@@ -13,7 +13,7 @@ import torch.distributed as dist
 from lavis.common.dist_utils import get_rank, get_world_size, is_main_process, is_dist_avail_and_initialized
 from lavis.common.logger import MetricLogger, SmoothedValue
 from lavis.common.registry import registry
-from lavis.datasets.data_utils import prepare_sample
+from lavis.datasets.data_utils import prepare_sample, prepare_sample_eval
 
 
 class BaseTask:
@@ -86,13 +86,13 @@ class BaseTask:
     def evaluation(self, model, data_loader, cuda_enabled=True):
         metric_logger = MetricLogger(delimiter="  ")
         header = "Evaluation"
+
         # TODO make it configurable
         print_freq = 10
 
         results = []
-
         for samples in metric_logger.log_every(data_loader, print_freq, header):
-            samples = prepare_sample(samples, cuda_enabled=cuda_enabled)
+            samples = prepare_sample_eval(samples, cuda_enabled=cuda_enabled)
 
             eval_output = self.valid_step(model=model, samples=samples)
             results.extend(eval_output)
@@ -222,24 +222,27 @@ class BaseTask:
                 loss, loss_dict = self.train_step(model=model, samples=samples)
                 loss /= accum_grad_iters #TODO: not affect loss_dict values for logging
 
-            # after_train_step()
-            if use_amp:
-                scaler.scale(loss).backward()
+            if torch.isnan(loss).item() == True or torch.isinf(loss).item() == True:
+                print("nan samples")
+                print(samples)
             else:
-                loss.backward()
-
-            # update gradients every accum_grad_iters iterations
-            if (i + 1) % accum_grad_iters == 0:
+                # after_train_step()
                 if use_amp:
-                    scaler.step(optimizer)
-                    scaler.update()                     
-                else:    
-                    optimizer.step()
-                optimizer.zero_grad()
+                    scaler.scale(loss).backward()
+                else:
+                    loss.backward()
 
-            metric_logger.update(**loss_dict)
-            metric_logger.update(lr=optimizer.param_groups[0]["lr"])
+                # update gradients every accum_grad_iters iterations
+                if (i + 1) % accum_grad_iters == 0:
+                    if use_amp:
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        optimizer.step()
+                    optimizer.zero_grad()
 
+                metric_logger.update(**loss_dict)
+                metric_logger.update(lr=optimizer.param_groups[0]["lr"])
         # after train_epoch()
         # gather the stats from all processes
         metric_logger.synchronize_between_processes()
